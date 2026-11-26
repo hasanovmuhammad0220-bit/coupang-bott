@@ -1,10 +1,12 @@
-"""Coupang Goldbox chegirmalarini Telegram guruhiga tashlaydigan bot.
+"""Coupang chegirmalarini (avto moy, avto qismlar, brend kiyim, oyoq kiyim)
+Telegram guruhiga kuniga 3 marta tashlaydigan bot.
 
 Faqat Python standart kutubxonasi ishlatiladi.
 Muhit o'zgaruvchilari: APIFY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 """
 
 import argparse
+import datetime
 import html
 import json
 import os
@@ -14,8 +16,19 @@ import time
 import urllib.error
 import urllib.request
 
-POST_COUNT = 20
-FETCH_COUNT = 40
+# ===== SOZLAMALAR (shu yerni o'zgartirsangiz bo'ladi) =====
+# (postdagi nomi, Coupang'da qidiriladigan so'z — koreyscha)
+KEYWORDS = [
+    ("🛢 Avto moy", "엔진오일"),
+    ("🔧 Avto ehtiyot qismlar", "자동차 부품"),
+    ("👕 Brend kiyim", "나이키 의류"),
+    ("👟 Oyoq kiyim", "운동화"),
+]
+PER_KEYWORD = 11          # har bir so'zdan nechta mahsulot olinadi (bepul $5 limit uchun)
+SLOTS = {"morning": 5, "noon": 10, "evening": 5}   # 08:00, 12:00, 18:00
+POOL_PATH = "data/pool.json"
+# ===========================================================
+TOTAL = sum(SLOTS.values())
 PAUSE_SECONDS = 4
 APIFY_URL = (
     "https://api.apify.com/v2/acts/lentic_clockss~coupang-scraper/"
@@ -105,6 +118,8 @@ def format_caption(item):
 
     head = f"🔥 <b>-{int(round(discount))}%</b>  {title}" if discount > 0 else f"🔥 {title}"
     lines = [head]
+    if item.get("_category"):
+        lines.insert(0, f"<i>{html.escape(str(item['_category']))}</i>")
     if price:
         if old and old > price:
             lines.append(f"<s>{_won(old)}</s>  →  <b>{_won(price)}</b>")
@@ -142,13 +157,13 @@ def _post_json(url, payload, headers=None, timeout=60):
         raise HttpError(e.code, e.read().decode("utf-8", "replace")[:500]) from None
 
 
-def fetch_goldbox(token, max_results=FETCH_COUNT):
-    """Apify orqali Coupang Goldbox ro'yxatini oladi (token sarlavhada, URL'da emas)."""
+def fetch_keyword(token, keyword, max_results=PER_KEYWORD):
+    """Apify orqali Coupang'da kalit so'z bo'yicha qidiradi (token sarlavhada, URL'da emas)."""
     for attempt in (1, 2):
         try:
             data = _post_json(
                 APIFY_URL,
-                {"mode": "goldbox", "maxResults": max_results},
+                {"mode": "keywordSearch", "keyword": keyword, "maxResults": max_results},
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=330,  # Apify o'zi 300 s da 408 qaytaradi
             )
@@ -163,6 +178,69 @@ def fetch_goldbox(token, max_results=FETCH_COUNT):
     if not isinstance(data, list):
         raise RuntimeError(f"Apify kutilmagan javob qaytardi: {str(data)[:200]}")
     return data
+
+
+def collect(token):
+    """Har bir kalit so'z bo'yicha qidiradi; {nomi: [mahsulotlar]} qaytaradi."""
+    by_cat, errors = {}, []
+    for label, keyword in KEYWORDS:
+        try:
+            items = fetch_keyword(token, keyword)
+        except Exception as e:
+            print(f"  '{keyword}' qidirilmadi: {e}")
+            errors.append(keyword)
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                item["_category"] = label
+        by_cat[label] = items
+        print(f"  {label}: {len(items)} ta mahsulot")
+    if not by_cat:
+        raise RuntimeError("hech bir kalit so'z bo'yicha ma'lumot olinmadi")
+    return by_cat
+
+
+def _key(item):
+    return item.get("productId") or item.get("url") or item.get("title")
+
+
+def build_queue(by_cat, total=TOTAL):
+    """Har bo'limdan navbatma-navbat eng katta chegirmani oladi (aralash), takrorsiz."""
+    lists = [[i for i in pick_top(items, len(items)) if _discount(i) > 0]
+             for items in by_cat.values()]
+    queue, seen = [], set()
+    while len(queue) < total and any(lists):
+        for lst in lists:
+            while lst:
+                item = lst.pop(0)
+                if _key(item) not in seen:
+                    seen.add(_key(item))
+                    queue.append(item)
+                    break
+            if len(queue) >= total:
+                break
+    return queue
+
+
+def today_kst():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date().isoformat()
+
+
+def load_pool(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("queue"), list):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_pool(path, date, queue):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"date": date, "queue": queue}, f, ensure_ascii=False, indent=1)
 
 
 def tg_call(bot_token, method, payload):
@@ -207,9 +285,11 @@ def send_item(bot_token, chat_id, item):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Coupang Goldbox → Telegram")
+    parser = argparse.ArgumentParser(description="Coupang chegirmalar → Telegram")
+    parser.add_argument("--slot", choices=list(SLOTS), required=True,
+                        help="morning=08:00, noon=12:00, evening=18:00")
     parser.add_argument("--dry-run", action="store_true", help="faqat ko'rsatadi, yubormaydi")
-    parser.add_argument("--count", type=int, default=POST_COUNT)
+    parser.add_argument("--pool", default=POOL_PATH)
     args = parser.parse_args(argv)
 
     apify = os.environ.get("APIFY_TOKEN", "").strip()
@@ -223,32 +303,41 @@ def main(argv=None):
         print("XATO: GitHub Secrets'da yo'q: " + ", ".join(missing))
         return 1
 
-    try:
-        items = fetch_goldbox(apify)
-    except Exception as e:
-        print(f"XATO: Apify'dan ma'lumot olinmadi: {e}")
-        return 1
+    today = today_kst()
+    pool = load_pool(args.pool)
+    if args.slot == "morning" or not pool or pool.get("date") != today:
+        print("Coupang'dan bugungi chegirmalar qidirilmoqda...")
+        try:
+            queue = build_queue(collect(apify))
+        except Exception as e:
+            print(f"XATO: Apify'dan ma'lumot olinmadi: {e}")
+            return 1
+        print(f"Bugun uchun {len(queue)} ta chegirmali mahsulot tanlandi.")
+        if not queue:
+            print("XATO: bugun chegirmali mahsulot topilmadi, hech narsa yuborilmadi.")
+            return 1
+    else:
+        queue = pool["queue"]
 
-    top = pick_top(items, args.count)
-    print(f"Apify'dan {len(items)} ta mahsulot keldi, {len(top)} tasi tanlandi.")
-    if not top:
-        print("XATO: bugun chegirmali mahsulot topilmadi, hech narsa yuborilmadi.")
-        return 1
-
-    sent = 0
-    for i, item in enumerate(top, 1):
-        if args.dry_run:
-            print(f"--- {i} ---\n{format_caption(item)}\nrasm: {find_image(item)}")
-            continue
-        print(f"{i}/{len(top)} yuborilmoqda...")
-        if send_item(bot, chat, item):
-            sent += 1
-        if i < len(top):
-            time.sleep(PAUSE_SECONDS)
+    take, rest = queue[: SLOTS[args.slot]], queue[SLOTS[args.slot]:]
+    if not take:
+        print("Bugungi chegirmalar tugadi, bu safar yuboriladigan narsa yo'q.")
+        return 0
 
     if args.dry_run:
+        for i, item in enumerate(take, 1):
+            print(f"--- {i} ---\n{format_caption(item)}\nrasm: {find_image(item)}")
         return 0
-    print(f"Tayyor: {sent}/{len(top)} ta post yuborildi.")
+
+    sent = 0
+    for i, item in enumerate(take, 1):
+        print(f"{i}/{len(take)} yuborilmoqda...")
+        if send_item(bot, chat, item):
+            sent += 1
+        if i < len(take):
+            time.sleep(PAUSE_SECONDS)
+    save_pool(args.pool, today, rest)
+    print(f"Tayyor: {sent}/{len(take)} ta post yuborildi. Keyingi vaqtlar uchun {len(rest)} ta qoldi.")
     return 0 if sent else 1
 
 

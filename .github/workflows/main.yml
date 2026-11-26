@@ -2,13 +2,28 @@ name: Kunlik chegirmalar
 
 on:
   schedule:
-    - cron: "45 22 * * *"
+    - cron: "0 23 * * *"   # 08:00 Koreya — 5 ta
+    - cron: "0 3 * * *"    # 12:00 Koreya — 10 ta
+    - cron: "0 9 * * *"    # 18:00 Koreya — 5 ta
   workflow_dispatch:
+    inputs:
+      slot:
+        description: "Qaysi vaqt (morning=08, noon=12, evening=18)"
+        type: choice
+        options: [morning, noon, evening]
+        default: morning
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chegirmalar
+  cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Chegirmalarni guruhga tashlash
@@ -16,4 +31,24 @@ jobs:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 bot/coupang_bot.py
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_SLOT: ${{ inputs.slot }}
+        run: |
+          case "$SCHEDULE" in
+            "0 23 * * *") SLOT=morning ;;
+            "0 3 * * *")  SLOT=noon ;;
+            "0 9 * * *")  SLOT=evening ;;
+            *)            SLOT="${MANUAL_SLOT:-morning}" ;;
+          esac
+          echo "Vaqt: $SLOT"
+          python3 bot/coupang_bot.py --slot "$SLOT"
+      - name: Qolgan mahsulotlarni saqlash
+        if: always()
+        run: |
+          if [ -f data/pool.json ]; then
+            git config user.name "chegirma-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add data/pool.json
+            git diff --cached --quiet || git commit -m "Chegirmalar ro'yxati yangilandi"
+            git push || echo "Saqlab bo'lmadi"
+          fi

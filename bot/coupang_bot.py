@@ -24,14 +24,14 @@ KEYWORDS = [
     ("👕 Brend kiyim", "나이키 의류"),
     ("👟 Oyoq kiyim", "운동화"),
 ]
-PER_KEYWORD = 11          # har bir so'zdan nechta mahsulot olinadi (bepul $5 limit uchun)
+PER_KEYWORD = 8           # har bir so'zdan nechta mahsulot olinadi (bepul $5 limit uchun)
 SLOTS = {"morning": 5, "noon": 10, "evening": 5}   # 08:00, 12:00, 18:00
 POOL_PATH = "data/pool.json"
 # ===========================================================
 TOTAL = sum(SLOTS.values())
 PAUSE_SECONDS = 4
 APIFY_URL = (
-    "https://api.apify.com/v2/acts/lentic_clockss~coupang-scraper/"
+    "https://api.apify.com/v2/acts/haketa~coupang-scraper/"
     "run-sync-get-dataset-items"
 )
 TITLE_MAX = 300
@@ -163,7 +163,18 @@ def fetch_keyword(token, keyword, max_results=PER_KEYWORD):
         try:
             data = _post_json(
                 APIFY_URL,
-                {"mode": "keywordSearch", "keyword": keyword, "maxResults": max_results},
+                {
+                    "queries": [keyword],
+                    "maxItems": max_results,
+                    "maxPagesPerQuery": 1,
+                    "includeDetails": False,
+                    "includeReviews": False,
+                    "proxyConfiguration": {
+                        "useApifyProxy": True,
+                        "apifyProxyGroups": ["RESIDENTIAL"],
+                        "apifyProxyCountry": "KR",
+                    },
+                },
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=330,  # Apify o'zi 300 s da 408 qaytaradi
             )
@@ -177,7 +188,25 @@ def fetch_keyword(token, keyword, max_results=PER_KEYWORD):
             print("Apify sekin javob berdi, yana bir marta urinilmoqda...")
     if not isinstance(data, list):
         raise RuntimeError(f"Apify kutilmagan javob qaytardi: {str(data)[:200]}")
-    return data
+    return [normalize(i) for i in data if isinstance(i, dict)]
+
+
+def normalize(item):
+    """haketa/coupang-scraper maydonlarini bot ishlatadigan nomlarga o'tkazadi."""
+    out = dict(item)
+    for src, dst in (("currentPrice", "price"), ("originalPrice", "listPrice"),
+                     ("discountPercent", "discountPercentage")):
+        if out.get(src) is not None and out.get(dst) is None:
+            out[dst] = out[src]
+    images = out.get("images")
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except ValueError:
+            images = None
+    if isinstance(images, list) and images and isinstance(images[0], str):
+        out.setdefault("image", images[0])
+    return out
 
 
 def collect(token):

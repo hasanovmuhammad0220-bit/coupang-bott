@@ -24,15 +24,16 @@ KEYWORDS = [
     ("👕 Brend kiyim", "나이키 의류"),
     ("👟 Oyoq kiyim", "운동화"),
 ]
-PER_KEYWORD = 8           # har bir so'zdan nechta mahsulot olinadi (bepul $5 limit uchun)
+PER_KEYWORD = 12          # har bir so'zdan nechta mahsulot olinadi (bepul $5 limit uchun)
 SLOTS = {"morning": 5, "noon": 10, "evening": 5}   # 08:00, 12:00, 18:00
 POOL_PATH = "data/pool.json"
 # ===========================================================
 TOTAL = sum(SLOTS.values())
 PAUSE_SECONDS = 4
+# timeout=280: dastur 300 s lik kutish chegarasidan oldin to'xtab, topganini qaytaradi
 APIFY_URL = (
-    "https://api.apify.com/v2/acts/haketa~coupang-scraper/"
-    "run-sync-get-dataset-items"
+    "https://api.apify.com/v2/acts/piotrv1001~coupang-listings-scraper/"
+    "run-sync-get-dataset-items?timeout=280"
 )
 TITLE_MAX = 300
 IMAGE_KEYS = ("image", "imageUrl", "imageURL", "thumbnail", "productImage")
@@ -63,6 +64,8 @@ def _price(item):
 
 def _discount(item):
     d = to_number(item.get("discountPercentage"))
+    if d and d < 1:          # 0.27 ko'rinishida kelsa — 27%
+        d = round(d * 100)
     if d:
         return d
     # chegirma foizi berilmagan bo'lsa — narxlardan hisoblaymiz
@@ -163,18 +166,7 @@ def fetch_keyword(token, keyword, max_results=PER_KEYWORD):
         try:
             data = _post_json(
                 APIFY_URL,
-                {
-                    "queries": [keyword],
-                    "maxItems": max_results,
-                    "maxPagesPerQuery": 1,
-                    "includeDetails": False,
-                    "includeReviews": False,
-                    "proxyConfiguration": {
-                        "useApifyProxy": True,
-                        "apifyProxyGroups": ["RESIDENTIAL"],
-                        "apifyProxyCountry": "KR",
-                    },
-                },
+                {"searchTerms": [keyword], "maxResults": max_results},
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=330,  # Apify o'zi 300 s da 408 qaytaradi
             )
@@ -194,7 +186,8 @@ def fetch_keyword(token, keyword, max_results=PER_KEYWORD):
 def normalize(item):
     """haketa/coupang-scraper maydonlarini bot ishlatadigan nomlarga o'tkazadi."""
     out = dict(item)
-    for src, dst in (("currentPrice", "price"), ("originalPrice", "listPrice"),
+    for src, dst in (("salesPrice", "price"), ("currentPrice", "price"),
+                     ("originalPrice", "listPrice"), ("discountRate", "discountPercentage"),
                      ("discountPercent", "discountPercentage")):
         if out.get(src) is not None and out.get(dst) is None:
             out[dst] = out[src]
